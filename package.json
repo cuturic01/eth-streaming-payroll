@@ -1,0 +1,25 @@
+{
+  "name": "eth-streaming-payroll",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cuturic01/eth-streaming-payroll.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/cuturic01/eth-streaming-payroll/issues"
+  },
+  "homepage": "https://github.com/cuturic01/eth-streaming-payroll#readme",
+  "devDependencies": {
+    "hardhat": "^2.26.1"
+  },
+  "dependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^6.1.0"
+  }
+}
