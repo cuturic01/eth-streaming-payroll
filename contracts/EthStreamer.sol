@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-interface IStreamingContractV1 {
+contract EthStreamer is Ownable, ReentrancyGuard {
     struct Stream {
         address recipient;
         address sender;
+        address tokenAddress; // address(0) for ETH
         uint256 startTime;
         uint256 endTime;
         uint256 totalAmount;
         uint256 withdrawnAmount;
+        bool cancelled;
     }
 
     event StreamCreated(
@@ -28,81 +32,133 @@ interface IStreamingContractV1 {
         uint256 amount
     );
 
-    /// Invalid start time.
+    event StreamCancelled(
+        uint256 indexed streamId,
+        uint256 recipientBalance,
+        uint256 senderBalance
+    );
+
     error Streaming_InvalidStartTime();
-    /// Stream does not exist.
     error Streaming_StreamNotExist();
-    
+    error Streaming_NotRecipient();
+    error Streaming_NotSender();
+    error Streaming_AlreadyCancelled();
 
-    // Create a new ETH stream (totalAmount comes from msg.value)
-    function createStream(
-        address recipient,
-        uint256 startTime,
-        uint256 endTime
-    ) external payable returns (uint256 streamId);
-
-    // Withdraw available funds from a stream
-    function withdrawFromStream(uint256 streamId) external;
-
-    // Check withdrawable amount
-    function calculateWithdrawableAmount(
-        uint256 streamId
-    ) external view returns (uint256);
-}
-
-contract EthStreamer is IStreamingContractV1, Ownable {
-    uint streamCounter;
-    mapping(uint => Stream) public streams;
+    uint256 public streamCounter;
+    mapping(uint256 => Stream) public streams;
 
     constructor(address _owner) Ownable(_owner) {}
 
+    modifier streamExists(uint256 streamId) {
+        if (streams[streamId].sender == address(0)) {
+            revert Streaming_StreamNotExist();
+        }
+        _;
+    }
+
     function createStream(
         address recipient,
+        address tokenAddress,
         uint256 startTime,
         uint256 endTime
-    ) external payable override onlyOwner returns (uint256 streamId) {
-        require(startTime < endTime, Streaming_InvalidStartTime());
-        require(startTime >= block.timestamp, Streaming_InvalidStartTime());
-        Stream memory stream = Stream({
+    ) external payable onlyOwner returns (uint256 streamId) {
+        if (startTime < block.timestamp || endTime <= startTime) {
+            revert Streaming_InvalidStartTime();
+        }
+
+        uint256 totalAmount = tokenAddress == address(0) ? msg.value : 0;
+        if (tokenAddress != address(0)) {
+            totalAmount = IERC20(tokenAddress).allowance(msg.sender, address(this));
+            require(totalAmount > 0, "Token amount not approved");
+            IERC20(tokenAddress).transferFrom(msg.sender, address(this), totalAmount);
+        }
+
+        streamCounter += 1;
+        streams[streamCounter] = Stream({
             recipient: recipient,
             sender: msg.sender,
+            tokenAddress: tokenAddress,
             startTime: startTime,
             endTime: endTime,
-            totalAmount: msg.value,
-            withdrawnAmount: 0
+            totalAmount: totalAmount,
+            withdrawnAmount: 0,
+            cancelled: false
         });
-        streamCounter += 1;
-        streams[streamCounter] = stream;
 
-        emit StreamCreated(
-            streamCounter,
-            msg.sender,
-            recipient,
-            msg.value,
-            startTime,
-            endTime
-        );
+        emit StreamCreated(streamCounter, msg.sender, recipient, totalAmount, startTime, endTime);
         return streamCounter;
     }
 
-    function withdrawFromStream(uint256 streamId) external override {
-        Stream memory stream = streams[streamId];
-        require(stream.sender != address(0), Streaming_StreamNotExist());
-        uint256 amount = (block.timestamp - stream.startTime) /
-            (stream.endTime - stream.startTime);
-        if (amount > stream.totalAmount) amount = stream.totalAmount;
-        (bool success, ) = msg.sender.call{value: amount}("");
-        require(success, "Transfer failed");
+    function calculateWithdrawableAmount(uint256 streamId)
+        public
+        view
+        streamExists(streamId)
+        returns (uint256)
+    {
+        Stream storage stream = streams[streamId];
+        if (block.timestamp < stream.startTime || stream.cancelled) {
+            return 0;
+        }
+
+        uint256 elapsed = block.timestamp > stream.endTime
+            ? stream.endTime - stream.startTime
+            : block.timestamp - stream.startTime;
+
+        uint256 totalDuration = stream.endTime - stream.startTime;
+        uint256 unlockedAmount = (stream.totalAmount * elapsed) / totalDuration;
+
+        if (unlockedAmount < stream.withdrawnAmount) return 0;
+        return unlockedAmount - stream.withdrawnAmount;
     }
 
-    function calculateWithdrawableAmount(
-        uint256 streamId
-    ) external view override returns (uint256) {
-        Stream memory stream = streams[streamId];
-        require(stream.sender != address(0), Streaming_StreamNotExist());
+    function withdrawFromStream(uint256 streamId) external nonReentrant streamExists(streamId) {
+        Stream storage stream = streams[streamId];
+        if (stream.recipient != msg.sender) revert Streaming_NotRecipient();
 
-        return
-            (block.timestamp - stream.startTime) /
-            (stream.endTime - stream.startTime);
+        uint256 amount = calculateWithdrawableAmount(streamId);
+        require(amount > 0, "Nothing to withdraw");
+
+        stream.withdrawnAmount += amount;
+
+        if (stream.tokenAddress == address(0)) {
+            (bool success, ) = msg.sender.call{value: amount}("");
+            require(success, "ETH transfer failed");
+        } else {
+            IERC20(stream.tokenAddress).transfer(msg.sender, amount);
+        }
+
+        emit Withdrawal(streamId, msg.sender, amount);
+    }
+
+    function cancelStream(uint256 streamId) external streamExists(streamId) nonReentrant {
+        Stream storage stream = streams[streamId];
+        if (stream.sender != msg.sender) revert Streaming_NotSender();
+        if (stream.cancelled) revert Streaming_AlreadyCancelled();
+
+        uint256 withdrawable = calculateWithdrawableAmount(streamId);
+        uint256 remaining = stream.totalAmount - stream.withdrawnAmount - withdrawable;
+
+        stream.cancelled = true;
+        stream.withdrawnAmount = stream.totalAmount;
+
+        if (withdrawable > 0) {
+            if (stream.tokenAddress == address(0)) {
+                (bool sent, ) = stream.recipient.call{value: withdrawable}("");
+                require(sent, "ETH to recipient failed");
+            } else {
+                IERC20(stream.tokenAddress).transfer(stream.recipient, withdrawable);
+            }
+        }
+
+        if (remaining > 0) {
+            if (stream.tokenAddress == address(0)) {
+                (bool sent, ) = stream.sender.call{value: remaining}("");
+                require(sent, "ETH to sender failed");
+            } else {
+                IERC20(stream.tokenAddress).transfer(stream.sender, remaining);
+            }
+        }
+
+        emit StreamCancelled(streamId, withdrawable, remaining);
     }
 }
