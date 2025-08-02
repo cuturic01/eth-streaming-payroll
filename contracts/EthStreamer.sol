@@ -1,19 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 
-contract EthStreamer is Ownable, ReentrancyGuard {
+pragma solidity 0.8.26;
+
+interface IStreamingContractV1 {
     struct Stream {
         address recipient;
         address sender;
-        address tokenAddress; // address(0) for ETH
         uint256 startTime;
         uint256 endTime;
         uint256 totalAmount;
         uint256 withdrawnAmount;
+        address tokenAddress;
         bool cancelled;
     }
 
@@ -40,14 +43,45 @@ contract EthStreamer is Ownable, ReentrancyGuard {
 
     error Streaming_InvalidStartTime();
     error Streaming_StreamNotExist();
-    error Streaming_NotRecipient();
     error Streaming_NotSender();
     error Streaming_AlreadyCancelled();
+    error Streaming_NotNftOwner();
+    error Streaming_NothingToWithraw();
 
+    // Create a new ETH stream (totalAmount comes from msg.value)
+    function createStream(
+        address recipient,
+        uint256 startTime,
+        uint256 endTime
+    ) external payable returns (uint256 streamId);
+
+    // Withdraw available funds from a stream
+    function withdrawFromStream(uint256 streamId) external;
+
+    // View stream details
+    function getStream(uint256 streamId) external view returns (Stream memory);
+
+    // Check withdrawable amount
+    function calculateWithdrawableAmount(
+        uint256 streamId
+    ) external view returns (uint256);
+
+    // Cancel a stream (only sender can call)
+    function cancelStream(uint256 streamId) external;
+}
+
+contract EthStremer is
+    IStreamingContractV1,
+    Ownable,
+    ReentrancyGuard,
+    ERC721Enumerable
+{
     uint256 public streamCounter;
     mapping(uint256 => Stream) public streams;
 
-    constructor(address _owner) Ownable(_owner) {}
+    constructor(
+        address _owner
+    ) ERC721("Streaming Payroll NFT", "STREAM") Ownable(_owner) {}
 
     modifier streamExists(uint256 streamId) {
         if (streams[streamId].sender == address(0)) {
@@ -66,16 +100,26 @@ contract EthStreamer is Ownable, ReentrancyGuard {
             revert Streaming_InvalidStartTime();
         }
 
-        uint256 totalAmount = tokenAddress == address(0) ? msg.value : 0;
-        if (tokenAddress != address(0)) {
-            totalAmount = IERC20(tokenAddress).allowance(msg.sender, address(this));
+        uint256 totalAmount;
+        if (tokenAddress == address(0)) {
+            totalAmount = msg.value;
+        } else {
+            totalAmount = IERC20(tokenAddress).allowance(
+                msg.sender,
+                address(this)
+            );
             require(totalAmount > 0, "Token amount not approved");
-            IERC20(tokenAddress).transferFrom(msg.sender, address(this), totalAmount);
+            IERC20(tokenAddress).transferFrom(
+                msg.sender,
+                address(this),
+                totalAmount
+            );
         }
 
         streamCounter += 1;
-        streams[streamCounter] = Stream({
-            recipient: recipient,
+        streamId = streamCounter;
+
+        streams[streamId] = Stream({
             sender: msg.sender,
             tokenAddress: tokenAddress,
             startTime: startTime,
@@ -85,16 +129,21 @@ contract EthStreamer is Ownable, ReentrancyGuard {
             cancelled: false
         });
 
-        emit StreamCreated(streamCounter, msg.sender, recipient, totalAmount, startTime, endTime);
-        return streamCounter;
+        _safeMint(recipient, streamId);
+
+        emit StreamCreated(
+            streamId,
+            msg.sender,
+            recipient,
+            totalAmount,
+            startTime,
+            endTime
+        );
     }
 
-    function calculateWithdrawableAmount(uint256 streamId)
-        public
-        view
-        streamExists(streamId)
-        returns (uint256)
-    {
+    function calculateWithdrawableAmount(
+        uint256 streamId
+    ) public view streamExists(streamId) returns (uint256) {
         Stream storage stream = streams[streamId];
         if (block.timestamp < stream.startTime || stream.cancelled) {
             return 0;
@@ -105,48 +154,55 @@ contract EthStreamer is Ownable, ReentrancyGuard {
             : block.timestamp - stream.startTime;
 
         uint256 totalDuration = stream.endTime - stream.startTime;
-        uint256 unlockedAmount = (stream.totalAmount * elapsed) / totalDuration;
+        uint256 unlocked = (stream.totalAmount * elapsed) / totalDuration;
 
-        if (unlockedAmount < stream.withdrawnAmount) return 0;
-        return unlockedAmount - stream.withdrawnAmount;
+        if (unlocked < stream.withdrawnAmount) return 0;
+        return unlocked - stream.withdrawnAmount;
     }
 
-    function withdrawFromStream(uint256 streamId) external nonReentrant streamExists(streamId) {
-        Stream storage stream = streams[streamId];
-        if (stream.recipient != msg.sender) revert Streaming_NotRecipient();
+    function withdrawFromStream(
+        uint256 streamId
+    ) external nonReentrant streamExists(streamId) {
+        require(ownerOf(streamId) == msg.sender, Streaming_NotNftOwner());
 
         uint256 amount = calculateWithdrawableAmount(streamId);
-        require(amount > 0, "Nothing to withdraw");
+        require(amount > 0, Streaming_NothingToWithraw());
 
-        stream.withdrawnAmount += amount;
+        streams[streamId].withdrawnAmount += amount;
 
-        if (stream.tokenAddress == address(0)) {
-            (bool success, ) = msg.sender.call{value: amount}("");
-            require(success, "ETH transfer failed");
+        address token = streams[streamId].tokenAddress;
+        if (token == address(0)) {
+            (bool sent, ) = msg.sender.call{value: amount}("");
+            require(sent, "ETH transfer failed");
         } else {
-            IERC20(stream.tokenAddress).transfer(msg.sender, amount);
+            IERC20(token).transfer(msg.sender, amount);
         }
 
         emit Withdrawal(streamId, msg.sender, amount);
     }
 
-    function cancelStream(uint256 streamId) external streamExists(streamId) nonReentrant {
+    function cancelStream(
+        uint256 streamId
+    ) external nonReentrant streamExists(streamId) {
         Stream storage stream = streams[streamId];
-        if (stream.sender != msg.sender) revert Streaming_NotSender();
+        if (msg.sender != stream.sender) revert Streaming_NotSender();
         if (stream.cancelled) revert Streaming_AlreadyCancelled();
 
+        address recipient = ownerOf(streamId);
         uint256 withdrawable = calculateWithdrawableAmount(streamId);
-        uint256 remaining = stream.totalAmount - stream.withdrawnAmount - withdrawable;
+        uint256 remaining = stream.totalAmount -
+            stream.withdrawnAmount -
+            withdrawable;
 
-        stream.cancelled = true;
         stream.withdrawnAmount = stream.totalAmount;
+        stream.cancelled = true;
 
         if (withdrawable > 0) {
             if (stream.tokenAddress == address(0)) {
-                (bool sent, ) = stream.recipient.call{value: withdrawable}("");
+                (bool sent, ) = recipient.call{value: withdrawable}("");
                 require(sent, "ETH to recipient failed");
             } else {
-                IERC20(stream.tokenAddress).transfer(stream.recipient, withdrawable);
+                IERC20(stream.tokenAddress).transfer(recipient, withdrawable);
             }
         }
 
@@ -160,5 +216,11 @@ contract EthStreamer is Ownable, ReentrancyGuard {
         }
 
         emit StreamCancelled(streamId, withdrawable, remaining);
+    }
+
+    function supportsInterface(
+        bytes4 interfaceId
+    ) public view override(ERC721Enumerable) returns (bool) {
+        return super.supportsInterface(interfaceId);
     }
 }
