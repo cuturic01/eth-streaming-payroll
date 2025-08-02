@@ -11,7 +11,7 @@ task(
   const EthStreamerFactory = await hre.ethers.getContractFactory(
     "EthStreamer"
   );
-  const streamer = await EthStreamerFactory.deploy();
+  const streamer = await EthStreamerFactory.deploy("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
   await streamer.waitForDeployment();
   const streamerAddress = await streamer.getAddress();
   console.log("EthStreamer deployed at:", streamerAddress);

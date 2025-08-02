@@ -31,3 +31,30 @@ logs/
 
 # Optional OS junk
 Thumbs.db
+
+# Foundry build output
+out/
+cache/
+broadcast/
+
+# Dependencies
+lib/
+lib-foundry/
+
+# Forge coverage plugin (if used)
+coverage/
+
+# Remappings file (can be regenerated)
+remappings.txt
+
+# Forge standard output logs
+*.t.sol.json
+
+# VSCode settings (optional)
+.vscode/
+
+# Node stuff if mixed with Hardhat
+node_modules/
+package-lock.json
+yarn.lock
+.env

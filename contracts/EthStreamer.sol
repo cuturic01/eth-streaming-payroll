@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.30;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
-
-pragma solidity 0.8.26;
 
 interface IStreamingContractV1 {
     struct Stream {
@@ -41,13 +39,6 @@ interface IStreamingContractV1 {
         uint256 senderBalance
     );
 
-    error Streaming_InvalidStartTime();
-    error Streaming_StreamNotExist();
-    error Streaming_NotSender();
-    error Streaming_AlreadyCancelled();
-    error Streaming_NotNftOwner();
-    error Streaming_NothingToWithraw();
-
     // Create a new ETH stream (totalAmount comes from msg.value)
     function createStream(
         address recipient,
@@ -58,9 +49,6 @@ interface IStreamingContractV1 {
     // Withdraw available funds from a stream
     function withdrawFromStream(uint256 streamId) external;
 
-    // View stream details
-    function getStream(uint256 streamId) external view returns (Stream memory);
-
     // Check withdrawable amount
     function calculateWithdrawableAmount(
         uint256 streamId
@@ -70,7 +58,14 @@ interface IStreamingContractV1 {
     function cancelStream(uint256 streamId) external;
 }
 
-contract EthStremer is
+error Streaming_InvalidStartTime();
+error Streaming_StreamNotExist();
+error Streaming_NotSender();
+error Streaming_AlreadyCancelled();
+error Streaming_NotNftOwner();
+error Streaming_NothingToWithraw();
+
+contract EthStreamer is
     IStreamingContractV1,
     Ownable,
     ReentrancyGuard,
@@ -121,6 +116,7 @@ contract EthStremer is
 
         streams[streamId] = Stream({
             sender: msg.sender,
+            recipient: recipient,
             tokenAddress: tokenAddress,
             startTime: startTime,
             endTime: endTime,
@@ -223,4 +219,10 @@ contract EthStremer is
     ) public view override(ERC721Enumerable) returns (bool) {
         return super.supportsInterface(interfaceId);
     }
+
+    function createStream(
+        address recipient,
+        uint256 startTime,
+        uint256 endTime
+    ) external payable override returns (uint256 streamId) {}
 }
